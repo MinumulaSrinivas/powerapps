@@ -1,0 +1,691 @@
+trigger:
+  branches:
+    include:
+    - development
+pool:
+  name: Pool-AIZ-Global-Windows-Prod
+parameters:
+- name: environments
+  type: object
+  default:
+  - "development"
+  - "model-deployment"
+  - "production-ready"
+  - "production"
+- name: artifact_feed
+  default: 'a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd'
+variables:
+- name: appName
+  value: 'd2c_cms'
+stages:
+- stage: build
+  displayName: Build
+  condition: in(variables['Build.SourceBranchName'], 'development', 'production-ready')
+  jobs:
+  - job: CheckoutDev
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      inputs:
+        repository: self
+        persistCredentials: true
+        clean: true
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Get PR Message
+      name: get_prNumber
+      inputs:
+        targetType: 'inline'
+        script: "#Get-ChildItem -Path Env:\\\n $prNumber=${env:BUILD_SOURCEVERSIONMESSAGE}\n echo \"INFO: pull request is: $prNumber\"\n echo \"##vso[task.setvariable variable=prNumber;isoutput=true]$prNumber\" \n"
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Get Commit Id
+      name: setsha
+      inputs:
+        targetType: 'inline'
+        script: |
+          git config --global user.email "azure-devops@assurant.com"
+          git config --global user.name "ADO Agent"
+          echo "##vso[task.setvariable variable=commitId;isoutput=true]$(git rev-parse HEAD)"
+          echo "Git Commit is: $(git rev-parse HEAD)"
+          git branch -r
+  - job: buildapp
+    dependsOn:
+    - CheckoutDev
+    condition: succeeded()
+    displayName: Build App
+    pool:
+      vmImage: windows-latest
+    variables:
+    - name: solution
+      value: '**/*.sln'
+    - name: buildPlatform
+      value: 'Any CPU'
+    - name: buildConfiguration
+      value: 'Release'
+    steps:
+    - task: NuGetToolInstaller@1
+    - task: UseDotNet@2
+      inputs:
+        packageType: 'sdk'
+        version: '6.x'
+    - task: NuGetCommand@2
+      displayName: 'NuGet restore'
+      inputs:
+        command: 'restore'
+        restoreSolution: '**/*.sln'
+        feedsToUse: 'config'
+        nugetConfigPath: '$(System.DefaultWorkingDirectory)/NuGet.Config'
+    - task: VSBuild@1
+      inputs:
+        solution: '$(solution)'
+        msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactStagingDirectory)"'
+        platform: '$(buildPlatform)'
+        configuration: '$(buildConfiguration)'
+    - task: PublishBuildArtifacts@1
+      name: 'PublishBuildArtifacts'
+      displayName: 'Publish build artifacts'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+    - task: UniversalPackages@0
+      inputs:
+        command: 'publish'
+        publishDirectory: '$(Build.ArtifactStagingDirectory)'
+        feedsToUsePublish: 'internal'
+        vstsFeedPublish: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+        vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+        vstsFeedPackagePublish: d2c_cms
+        verbosity: 'Debug'
+        publishedPackageVar: packageAndVersion
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Package Published
+      name: PackagePublished
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Package is $(packageAndVersion)"
+          echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(packageAndVersion)"
+- stage: dev
+  displayName: Dev
+  dependsOn:
+  - build
+  pool:
+    name: Pool-AIZ-Global-Windows-Prod
+  variables:
+  - name: artifactNameAndVersion
+    value: $[ stageDependencies.build.buildapp.outputs['PackagePublished.PackageNameAndVersion'] ]
+  - name: artifactVersion
+    value: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+  - name: commitId
+    value: $[ stageDependencies.build.CheckoutDev.outputs['setsha.commitId']]
+  - name: getPrNumber
+    value: $[ stageDependencies.build.CheckoutDev.outputs['get_prNumber.prNumber']]
+  jobs:
+  - job: ArtifactAndVersion
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      condition: false
+      inputs:
+        repository: none
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Get Artifact Name and Version
+      name: PackagePublished
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Commit Id: $(commitId)"
+          echo "Artifact To Deploy: $(artifactNameAndVersion)"
+          echo "Artifact Version: $(artifactVersion)"
+          echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+          echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+          echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+          echo "##vso[task.setvariable variable=prNumber]$(getPrNumber)"
+  - deployment: DeploytoDev
+    displayName: Deploy
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    environment:
+      name: d2c-greenfield-dev
+    variables:
+    - group: d2c-sitefinity-cms-dev
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: $(artifactVersion)
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-dev'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Dev'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-dev'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-DEV'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+- stage: model
+  displayName: Model
+  dependsOn:
+  - dev
+  pool:
+    name: Pool-AIZ-Global-Windows-Prod
+  variables:
+  - name: artifactNameAndVersion
+    value: $[ stageDependencies.dev.ArtifactAndVersion.outputs['PackagePublished.PackageNameAndVersion'] ]
+  - name: artifactVersion
+    value: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+  - name: commitId
+    value: $[ stageDependencies.dev.ArtifactAndVersion.outputs['PackagePublished.commitId']]
+  - name: pullRequestNumber
+    value: $[ stageDependencies.dev.ArtifactAndVersion.outputs['PackagePublished.prNumber']]
+  jobs:
+  - job: AutoMergingToModel
+    displayName: "Auto Merging To Model Branch"
+    condition: succeeded()
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      inputs:
+        repository: self
+        persistCredentials: true
+        clean: true
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Auto Merging Model
+      name: set_sha
+      inputs:
+        targetType: 'inline'
+        script: "\"Write-Output 'System.DefaultWorkingDirectory: $(System.DefaultWorkingDirectory)'\"\ngit config --global user.email \"azure-devops@assurant.com\"\ngit config --global user.name \"ADO Agent\"\ngit fetch origin  \n$commitId='$(commitId)'\n$pullRequest='$(pullRequestNumber)'\necho \"##vso[task.setvariable variable=commitId;isoutput=true]$commitId\"\necho \"Git Commit is: $commitId\"\necho \"Using dev commit ID $commitId\"\ngit branch -v -a\ngit switch -c model-deployment origin/model-deployment\ngit status                  \ngit merge --allow-unrelated-histories --strategy-option theirs --ff $commitId -m \"$pullRequest - Auto Merge to model Commit Id: $commitId\" \ngit commit -m \"Auto Merge to model Build Number: $(Build.BuildNumber)\"\ngit push --set-upstream origin model-deployment\n"
+  - job: ArtifactAndVersion
+    dependsOn:
+    - AutoMergingToModel
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      condition: false
+      inputs:
+        repository: none
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Get Artifact Name and Version
+      name: PackagePublished
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Commit Id: $(commitId)"
+          echo "Artifact To Deploy: $(artifactNameAndVersion)"
+          echo "Artifact Version: $(artifactVersion)"
+          echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+          echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+          echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+          echo "##vso[task.setvariable variable=prNumber]$(pullRequestNumber)"
+  - deployment: DeploytoModel
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    displayName: Deploy
+    environment:
+      name: d2c-greenfield-model
+    variables:
+    - group: d2c-sitefinity-cms-model
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: $(artifactVersion)
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-model'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-model'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+  - deployment: DeploytoModelDR
+    environment:
+      name: d2c-greenfield-model
+    variables:
+    - group: d2c-sitefinity-cms-model-dr
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: "$(artifactVersion)"
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-model-EASTUS2-2'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-model-eastus2'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+- stage: ProductionReady
+  dependsOn:
+  - model
+  pool:
+    name: Pool-AIZ-Global-Windows-Prod
+  variables:
+  - name: artifactNameAndVersion
+    value: $[ stageDependencies.model.ArtifactAndVersion.outputs['PackagePublished.PackageNameAndVersion'] ]
+  - name: artifactVersion
+    value: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+  - name: commitId
+    value: $[ stageDependencies.model.ArtifactAndVersion.outputs['PackagePublished.commitId']]
+  - name: pullRequestNumber
+    value: $[ stageDependencies.model.ArtifactAndVersion.outputs['PackagePublished.prNumber']]
+  jobs:
+  - job: AutoMergingToProdReady
+    displayName: "Auto Merging To Production-Ready Branch"
+    condition: succeeded()
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      inputs:
+        repository: self
+        persistCredentials: true
+        clean: true
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Auto Merging Production Ready
+      name: set_sha
+      inputs:
+        targetType: 'inline'
+        script: "git config --global user.email \"azure-devops@assurant.com\"\ngit config --global user.name \"ADO Agent\"\ngit fetch origin  \n$commitId='$(commitId)'\n$pullRequest='$(pullRequestNumber)'\necho \"##vso[task.setvariable variable=commitId;isoutput=true]$commitId\"\necho \"Git Commit is: $commitId\"\necho \"Using dev commit ID $commitId\"\ngit branch -v -a\ngit switch -c production-ready origin/production-ready\ngit status                  \ngit merge --allow-unrelated-histories --strategy-option theirs --ff $commitId -m \"$pullRequest - Auto Merge to production-ready Commit Id: $commitId\" \ngit commit -m \"Auto Merge to production-ready Build Number: $(Build.BuildNumber)\"\ngit push --set-upstream origin production-ready\n"
+  - job: ArtifactAndVersion
+    dependsOn:
+    - AutoMergingToProdReady
+    steps:
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Get Artifact Name and Version
+      name: PackagePublished
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Artifact To Deploy: $(artifactNameAndVersion)"
+          echo "Artifact Version: $(artifactVersion)"
+          echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+          echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+          echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+          echo "##vso[task.setvariable variable=prNumber]$(pullRequestNumber)"
+  - deployment: DeploytoProductionReady
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    displayName: Deploy
+    environment:
+      name: d2c-greenfield-production-ready
+    variables:
+    - group: d2c-sitefinity-cms-model
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: $(artifactVersion)
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-model'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-model'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+  - deployment: DeploytoProductionReadyDR
+    environment:
+      name: d2c-greenfield-production-ready
+    variables:
+    - group: d2c-sitefinity-cms-model-dr
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: "$(artifactVersion)"
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-model-EASTUS2-2'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-model-eastus2'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+- stage: Prod
+  dependsOn:
+  - ProductionReady
+  variables:
+  - name: artifactNameAndVersion
+    value: $[ stageDependencies.ProductionReady.ArtifactAndVersion.outputs['PackagePublished.PackageNameAndVersion'] ]
+  - name: artifactVersion
+    value: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+  - name: commitId
+    value: $[ stageDependencies.ProductionReady.ArtifactAndVersion.outputs['PackagePublished.commitId']]
+  - name: pullRequestNumber
+    value: $[ stageDependencies.ProductionReady.ArtifactAndVersion.outputs['PackagePublished.prNumber']]
+  pool:
+    name: Pool-AIZ-Global-Windows-Prod
+  jobs:
+  - job: AutoMergingToProd
+    displayName: "Auto Merging To Production Branch"
+    condition: succeeded()
+    steps:
+    - task: 6d15af64-176c-496d-b583-fd2ae21d4df4@1
+      inputs:
+        repository: self
+        persistCredentials: true
+        clean: true
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Auto Merging Production
+      name: set_sha
+      inputs:
+        targetType: 'inline'
+        script: "git config --global user.email \"azure-devops@assurant.com\"\ngit config --global user.name \"ADO Agent\"\ngit fetch origin  \n$commitId='$(commitId)'\n$pullRequest='$(pullRequestNumber)'\necho \"##vso[task.setvariable variable=commitId;isoutput=true]$commitId\"\necho \"Git Commit is: $commitId\"\necho \"Using dev commit ID $commitId\"\ngit branch -v -a\ngit switch -c production origin/production\ngit status                  \ngit merge --allow-unrelated-histories --strategy-option theirs --ff $commitId -m \"$pullRequest - Auto Merge to production Commit Id: $commitId\" \ngit commit -m \"Auto Merge to production Build Number: $(Build.BuildNumber)\"\ngit push --set-upstream origin production\n"
+  - job: ArtifactAndVersion
+    dependsOn:
+    - AutoMergingToProd
+    steps:
+    - task: PowerShell@2
+      condition: succeeded()
+      displayName: Get Artifact Name and Version
+      name: PackagePublished
+      inputs:
+        targetType: 'inline'
+        script: |
+          echo "Artifact To Deploy: $(artifactNameAndVersion)"
+          echo "Artifact Version: $(artifactVersion)"
+          echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+          echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+          echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+  - deployment: DeploytoProd
+    displayName: Deploy
+    environment:
+      name: d2c-greenfield-prod
+    variables:
+    - group: d2c-sitefinity-cms-prod
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: $(artifactVersion)
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-prod'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Prod'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-prod'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-PROD'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+  - deployment: DeploytoProdDR
+    dependsOn:
+    - ArtifactAndVersion
+    condition: succeeded()
+    environment:
+      name: d2c-greenfield-prod
+    variables:
+    - group: d2c-sitefinity-cms-prod-dr
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: UniversalPackages@0
+            inputs:
+              command: 'download'
+              downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+              vstsFeed: a876599d-cf65-4384-b4ce-57f9db84e390/ac7d12b4-90e5-4de3-a744-acba9cf188fd
+              vstsFeedPackage: d2c_cms
+              vstsPackageVersion: $(artifactVersion)
+          - task: PowerShell@2
+            inputs:
+              targetType: inline
+              script: "$zipPath = \"$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip\"  \n$extractPath = \"$(Build.ArtifactStagingDirectory)/extracted\"  \nExpand-Archive -Path $zipPath -DestinationPath $extractPath -Force\nGet-ChildItem -Path \"$(Build.ArtifactStagingDirectory)/extracted/Content/\"\n"
+          - task: replacetokens@5
+            inputs:
+              rootDirectory: '$(Build.ArtifactStagingDirectory)/extracted\Content\D_C\a\1\s\obj\Release\Package\PackageTmp\App_Data\Sitefinity\Configuration'
+              targetFiles: '*Config.config'
+              encoding: 'auto'
+              writeBOM: true
+              verbosity: 'detailed'
+              actionOnMissing: 'warn'
+              keepToken: false
+              tokenPrefix: '#{'
+              tokenSuffix: '}#'
+              useLegacyPattern: false
+              enableTelemetry: false
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: "$(Build.ArtifactStagingDirectory)/extracted"
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: "$(Build.ArtifactStagingDirectory)/Assurant.Sitefinity.zip"
+              replaceExistingArchive: true
+              verbose: true
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy: app-D2Cappservice-ho3-cms-prod-EASTUS2'
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Prod'
+              appType: 'webApp'
+              WebAppName: 'app-D2Cappservice-ho3-cms-prod-eastus2'
+              deployToSlotOrASE: true
+              ResourceGroupName: 'RGGS-D2CHO3-PROD'
+              SlotName: 'production'
+              packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Sitefinity.zip'
+              enableXmlTransform: true
+

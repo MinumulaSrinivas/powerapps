@@ -1,0 +1,588 @@
+# Pipeline Add
+# trigger:
+#   branches:
+#     include:
+#       - development
+trigger:
+  - none
+#batch: true
+pool:
+  name: Pool-AIZ-Global-Windows-Prod
+parameters:
+- name: environment
+  type: string
+  # List of environments to validate
+- name: artifactVersion
+  type: string
+- name: artifact_feed
+  default: 'a876599d-cf65-4384-b4ce-57f9db84e390/934babc8-5fc0-4289-b8ef-a9cd700a4ce2'
+variables:
+- name: appName
+  value: 'd2c_render'
+- name: env
+  ${{ if eq(parameters['environment'], 'development') }}:
+    value: 'development'
+  ${{ if eq(parameters['environment'], 'model-deployment') }}:
+    value: 'model-deployment'
+  ${{ if eq(parameters['environment'], 'production-ready') }}:
+    value: 'production-ready'
+  ${{ if eq(parameters['environment'], 'production') }}:
+    value: 'production'
+stages:
+  - stage: DeploymenttoDev
+    condition: eq(variables.env, 'development')    
+    displayName: Dev
+    pool:
+      name: Pool-AIZ-Global-Windows-Prod
+    jobs:
+      - deployment: DeploytoDev
+        displayName: Deploy
+        environment: d2c-greenfield-dev
+        variables: 
+        - group: d2c-global-common-dev
+        - group: d2c-global-backend-sf-dev
+        strategy:
+         runOnce:
+            deploy:
+             steps: 
+             - task: UniversalPackages@0
+               condition: succeeded()
+               inputs:
+                 command: 'download'
+                 downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+                 vstsFeed: ${{ parameters.artifact_feed }}
+                 vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+                 vstsPackageVersion: '${{ parameters.artifactVersion}}'
+        
+             - task: AzureRmWebAppDeployment@4
+               displayName: 'Azure App Service Deploy: app-D2Cappservice-1'
+               name: dev_deployment
+               inputs:
+                 ConnectionType: 'AzureRM'
+                 azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Dev'
+                 appType: 'webApp'
+                 WebAppName: 'app-D2Cappservice-1'
+                 deployToSlotOrASE: true
+                 ResourceGroupName: 'RGGS-D2CHO3-DEV'
+                 SlotName: 'production'
+                 packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+                 enableXmlVariableSubstitution: true
+                 JSONFiles: '**/appsettings.json'
+
+  - stage: DeploymenttoModel
+    condition: and(eq(variables.env, 'model-deployment'), not(or(failed(), canceled())))  
+    displayName: Model
+    pool:
+      name: Pool-AIZ-Global-Windows-Prod
+    jobs:
+      - deployment: DeploytoModel      
+        displayName: Deploy_Model
+        environment: d2c-greenfield-model
+        variables:
+          - group: d2c-global-common-model
+          - group: d2c-global-backend-sf-model
+        strategy:
+          runOnce:
+            deploy:
+             steps:
+              - task: UniversalPackages@0
+                condition: succeeded()
+                inputs:
+                 command: 'download'
+                 downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+                 vstsFeed: ${{ parameters.artifact_feed }}
+                 vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+                 vstsPackageVersion: '${{ parameters.artifactVersion}}'
+          
+              - task: AzureRmWebAppDeployment@4
+                condition: succeeded()
+                displayName: 'Azure App Service Deploy: app-D2Cappservice-model-1'
+                inputs:
+                  ConnectionType: 'AzureRM'
+                  azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+                  appType: 'webApp'
+                  WebAppName: 'app-D2Cappservice-model-1'
+                  deployToSlotOrASE: true
+                  ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+                  SlotName: 'production'
+                  packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+                  enableXmlVariableSubstitution: true
+                  JSONFiles: '**/appsettings.json' 
+                
+      - deployment: DeploytoModelDR
+        displayName: Deploy_ModelDR
+        environment: d2c-greenfield-model
+        variables:
+          - group: d2c-global-common-model
+          - group: d2c-global-backend-sf-model-dr
+        strategy:
+          runOnce:
+            deploy:
+             steps:
+              - task: UniversalPackages@0
+                condition: succeeded()
+                inputs:
+                  command: 'download'
+                  downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+                  vstsFeed: ${{ parameters.artifact_feed }}
+                  vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+                  vstsPackageVersion: '${{ parameters.artifactVersion}}'
+              - task: AzureRmWebAppDeployment@4
+                condition: succeeded()
+                displayName: 'Azure App Service Deploy: app-D2Cappservice-model-EASTUS2-1'
+                inputs:
+                  ConnectionType: 'AzureRM'
+                  azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+                  appType: 'webApp'
+                  WebAppName: 'app-D2Cappservice-model-eastus2-1'
+                  deployToSlotOrASE: true
+                  ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+                  SlotName: 'production'
+                  packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+                  enableXmlVariableSubstitution: true
+                  JSONFiles: '**/appsettings.json'
+
+  - stage: DeploymenttoProd
+    condition: and(eq(variables.env, 'production'), not(or(failed(), canceled())))  
+    displayName: Prod
+    pool:
+      name: Pool-AIZ-Global-Windows-Prod
+    jobs:
+      - deployment: DeploytoProd        
+        displayName: Deploy_Prod
+        environment: d2c-greenfield-prod
+        variables:
+          - group: d2c-global-common-prod
+          - group: d2c-global-backend-sf-prod
+        strategy:
+         runOnce:
+           deploy:
+            steps:
+             - task: UniversalPackages@0
+               condition: succeeded()
+               inputs:
+                 command: 'download'
+                 downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+                 vstsFeed: ${{ parameters.artifact_feed }}
+                 vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+                 vstsPackageVersion: '${{ parameters.artifactVersion}}'
+       
+             - task: AzureRmWebAppDeployment@4
+               condition: succeeded()
+               displayName: 'Azure App Service Deploy: app-D2Cappservice-renderer'
+               inputs:
+                 ConnectionType: 'AzureRM'
+                 azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Prod'
+                 appType: 'webApp'
+                 WebAppName: 'app-D2Cappservice-renderer'
+                 deployToSlotOrASE: true
+                 ResourceGroupName: 'RGGS-D2CHO3-PROD'
+                 SlotName: 'production'
+                 packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+                 enableXmlVariableSubstitution: true
+                 JSONFiles: '**/appsettings.json'
+
+      - deployment: DeploytoProdDR
+        displayName: Deploy_ProdDR
+        environment: d2c-greenfield-prod
+        variables:
+          - group: d2c-global-common-prod
+          - group: d2c-global-backend-sf-prod-dr
+        strategy:
+         runOnce:
+           deploy:
+            steps:
+             - task: UniversalPackages@0
+               condition: succeeded()
+               inputs:
+                 command: 'download'
+                 downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+                 vstsFeed: ${{ parameters.artifact_feed }}
+                 vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+                 vstsPackageVersion: '${{ parameters.artifactVersion}}'
+
+             - task: AzureRmWebAppDeployment@4
+               condition: succeeded()
+               displayName: 'Azure App Service Deploy: app-D2Cappservice-renderer-EASTUS2'
+               inputs:
+                 ConnectionType: 'AzureRM'
+                 azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Prod'
+                 appType: 'webApp'
+                 WebAppName: 'app-D2Cappservice-renderer-eastus2'
+                 deployToSlotOrASE: true
+                 ResourceGroupName: 'RGGS-D2CHO3-PROD'
+                 SlotName: 'production'
+                 packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+                 enableXmlVariableSubstitution: true
+                 JSONFiles: '**/appsettings.json'
+
+
+#   - stage: model
+#     displayName: Model
+#     dependsOn: dev
+#     pool:
+#      name: Pool-AIZ-Global-Windows-Prod
+#     variables:
+#       artifactNameAndVersion: $[ stageDependencies.dev.ArtifactAndVersion.outputs['PackagePublished.PackageNameAndVersion'] ]
+#       artifactVersion: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+#       commitId: $[ stageDependencies.dev.ArtifactAndVersion.outputs['PackagePublished.commitId']] 
+#       pullRequestNumber: $[ stageDependencies.dev.ArtifactAndVersion.outputs['PackagePublished.prNumber']]
+#     jobs:  
+#      - job: AutoMergingToModel   
+#        displayName: "Auto Merging To Model Branch"  
+#        condition: succeeded()
+#        steps:
+#        - checkout: self
+#          persistCredentials: true
+#          clean: true
+#        - task: PowerShell@2    
+#          condition: succeeded()
+#          displayName: Auto Merging Model
+#          name: set_sha
+#          inputs:
+#            targetType: 'inline'
+#            script: |
+#              "Write-Output 'System.DefaultWorkingDirectory: $(System.DefaultWorkingDirectory)'"
+#              git config --global user.email "azure-devops@assurant.com"
+#              git config --global user.name "ADO Agent"
+#              git fetch origin  
+#              $commitId='$(commitId)'
+#              $pullRequest='$(pullRequestNumber)'
+#              echo "##vso[task.setvariable variable=commitId;isoutput=true]$commitId"
+#              echo "Git Commit is: $commitId"
+#              echo "Using dev commit ID $commitId"
+#              git branch -v -a
+#              git switch -c model-deployment origin/model-deployment
+#              git status                  
+#              git merge --allow-unrelated-histories --strategy-option theirs --ff $commitId -m "$pullRequest - Auto Merge to model Commit Id: $commitId" 
+#              git commit -m "Auto Merge to model Build Number: $(Build.BuildNumber)"
+#              git push --set-upstream origin model-deployment 
+
+#      - job: ArtifactAndVersion    
+#        dependsOn: AutoMergingToModel 
+#        steps:
+#           - checkout: none
+#           - task: PowerShell@2    
+#             condition: succeeded()
+#             displayName: Get Artifact Name and Version
+#             name: PackagePublished
+#             inputs:
+#               targetType: 'inline'
+#               script: |
+#                    echo "Commit Id: $(commitId)"
+#                    echo "Artifact To Deploy: $(artifactNameAndVersion)"
+#                    echo "Artifact Version: $(artifactVersion)"
+#                    echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+#                    echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+#                    echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+#                    echo "##vso[task.setvariable variable=prNumber]$(pullRequestNumber)"
+                   
+#      - deployment: DeploytoModel
+#        dependsOn: ArtifactAndVersion
+#        condition: succeeded()
+#        displayName: Deploy
+#        environment: d2c-greenfield-model
+#        variables:
+#          - group: d2c-global-common-model
+#          - group: d2c-global-backend-sf-model
+#        strategy:
+#          runOnce:
+#            deploy:
+#             steps:
+#              - task: UniversalPackages@0
+#                inputs:
+#                  command: 'download'
+#                  downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+#                  vstsFeed: ${{ parameters.artifact_feed }}
+#                  vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+#                  vstsPackageVersion: $(artifactVersion)
+         
+#              - task: AzureRmWebAppDeployment@4
+#                condition: succeeded()
+#                displayName: 'Azure App Service Deploy: app-D2Cappservice-model-1'
+#                inputs:
+#                  ConnectionType: 'AzureRM'
+#                  azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+#                  appType: 'webApp'
+#                  WebAppName: 'app-D2Cappservice-model-1'
+#                  deployToSlotOrASE: true
+#                  ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+#                  SlotName: 'production'
+#                  packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+#                  enableXmlVariableSubstitution: true
+#                  JSONFiles: '**/appsettings.json' 
+#      - deployment: DeploytoModelDR
+#        dependsOn: ArtifactAndVersion
+#        condition: succeeded()
+#        displayName: Deploy
+#        environment: d2c-greenfield-model
+#        variables:
+#          - group: d2c-global-common-model
+#          - group: d2c-global-backend-sf-model-dr
+#        strategy:
+#          runOnce:
+#            deploy:
+#             steps:
+#              - task: UniversalPackages@0
+#                inputs:
+#                  command: 'download'
+#                  downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+#                  vstsFeed: ${{ parameters.artifact_feed }}
+#                  vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+#                  vstsPackageVersion: $(artifactVersion)         
+#              - task: AzureRmWebAppDeployment@4
+#                condition: succeeded()
+#                displayName: 'Azure App Service Deploy: app-D2Cappservice-model-EASTUS2-1'
+#                inputs:
+#                  ConnectionType: 'AzureRM'
+#                  azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+#                  appType: 'webApp'
+#                  WebAppName: 'app-D2Cappservice-model-eastus2-1'
+#                  deployToSlotOrASE: true
+#                  ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+#                  SlotName: 'production'
+#                  packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+#                  enableXmlVariableSubstitution: true
+#                  JSONFiles: '**/appsettings.json'  
+#   - stage: ProductionReady
+#     dependsOn: model
+#     pool:
+#      name: Pool-AIZ-Global-Windows-Prod
+#     variables:
+#       artifactNameAndVersion:  $[ stageDependencies.model.ArtifactAndVersion.outputs['PackagePublished.PackageNameAndVersion'] ]
+#       artifactVersion: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+#       commitId: $[ stageDependencies.model.ArtifactAndVersion.outputs['PackagePublished.commitId']] 
+#       pullRequestNumber: $[ stageDependencies.model.ArtifactAndVersion.outputs['PackagePublished.prNumber']]
+#     jobs:  
+#      - job: AutoMergingToProdReady
+#        displayName: "Auto Merging To Production-Ready Branch"  
+#        condition: succeeded()
+#        steps:
+#        - checkout: self
+#          persistCredentials: true
+#          clean: true
+#        - task: PowerShell@2    
+#          condition: succeeded()
+#          displayName: Auto Merging Production Ready
+#          name: set_sha
+#          inputs:
+#            targetType: 'inline'
+#            script: |
+#              git config --global user.email "azure-devops@assurant.com"
+#              git config --global user.name "ADO Agent"
+#              git fetch origin  
+#              $commitId='$(commitId)'
+#              $pullRequest='$(pullRequestNumber)'
+#              echo "##vso[task.setvariable variable=commitId;isoutput=true]$commitId"
+#              echo "Git Commit is: $commitId"
+#              echo "Using dev commit ID $commitId"
+#              git branch -v -a
+#              git switch -c production-ready origin/production-ready
+#              git status                  
+#              git merge --allow-unrelated-histories --strategy-option theirs --ff $commitId -m "$pullRequest - Auto Merge to production-ready Commit Id: $commitId" 
+#              git commit -m "Auto Merge to production-ready Build Number: $(Build.BuildNumber)"
+#              git push --set-upstream origin production-ready
+#      - job: ArtifactAndVersion    
+#        dependsOn: AutoMergingToProdReady
+#        steps:
+#           - task: PowerShell@2    
+#             condition: succeeded()
+#             displayName: Get Artifact Name and Version
+#             name: PackagePublished
+#             inputs:
+#               targetType: 'inline'
+#               script: |
+#                    echo "Artifact To Deploy: $(artifactNameAndVersion)"
+#                    echo "Artifact Version: $(artifactVersion)"
+#                    echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+#                    echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+#                    echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+#                    echo "##vso[task.setvariable variable=prNumber]$(pullRequestNumber)"
+#      - deployment: DeploytoProductionReady
+#        dependsOn: ArtifactAndVersion
+#        condition: succeeded()
+#        displayName: Deploy
+#        environment: d2c-greenfield-production-ready
+#        variables:
+#           - group: d2c-global-common-model
+#           - group: d2c-global-backend-sf-model
+#        strategy:
+#          runOnce:
+#            deploy:
+#             steps:
+#              - task: UniversalPackages@0
+#                inputs:
+#                  command: 'download'
+#                  downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+#                  vstsFeed: ${{ parameters.artifact_feed }}
+#                  vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+#                  vstsPackageVersion: $(artifactVersion)
+         
+#              - task: AzureRmWebAppDeployment@4
+#                condition: succeeded()
+#                displayName: 'Azure App Service Deploy: app-D2Cappservice-model-1'
+#                inputs:
+#                  ConnectionType: 'AzureRM'
+#                  azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+#                  appType: 'webApp'
+#                  WebAppName: 'app-D2Cappservice-model-1'
+#                  deployToSlotOrASE: true
+#                  ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+#                  SlotName: 'production'
+#                  packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+#                  enableXmlVariableSubstitution: true
+#                  JSONFiles: '**/appsettings.json'
+#      - deployment: DeploytoProductionReadyDR
+#        dependsOn: ArtifactAndVersion
+#        condition: succeeded()
+#        displayName: Deploy
+#        environment: d2c-greenfield-production-ready
+#        variables:
+#          - group: d2c-global-common-model
+#          - group: d2c-global-backend-sf-model-dr
+#        strategy:
+#          runOnce:
+#            deploy:
+#             steps:
+#              - task: UniversalPackages@0
+#                inputs:
+#                  command: 'download'
+#                  downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+#                  vstsFeed: ${{ parameters.artifact_feed }}
+#                  vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+#                  vstsPackageVersion: $(artifactVersion)         
+#              - task: AzureRmWebAppDeployment@4
+#                condition: succeeded()
+#                displayName: 'Azure App Service Deploy: app-D2Cappservice-model-EASTUS2-1'
+#                inputs:
+#                  ConnectionType: 'AzureRM'
+#                  azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Model'
+#                  appType: 'webApp'
+#                  WebAppName: 'app-D2Cappservice-model-eastus2-1'
+#                  deployToSlotOrASE: true
+#                  ResourceGroupName: 'RGGS-D2CHO3-MODEL'
+#                  SlotName: 'production'
+#                  packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+#                  enableXmlVariableSubstitution: true
+#                  JSONFiles: '**/appsettings.json'
+#   - stage: Prod
+#     dependsOn: ProductionReady
+#     variables:
+#       artifactNameAndVersion:  $[ stageDependencies.ProductionReady.ArtifactAndVersion.outputs['PackagePublished.PackageNameAndVersion'] ]
+#       artifactVersion: $[replace(replace(variables['artifactNameAndVersion'], variables['appName'] , ''),' ','')]
+#       commitId: $[ stageDependencies.ProductionReady.ArtifactAndVersion.outputs['PackagePublished.commitId']] 
+#       pullRequestNumber: $[ stageDependencies.ProductionReady.ArtifactAndVersion.outputs['PackagePublished.prNumber']]
+#     pool:
+#      name: Pool-AIZ-Global-Windows-Prod
+#     jobs:
+#      - job: AutoMergingToProd  
+#        displayName: "Auto Merging To Production Branch"  
+#        condition: succeeded()
+#        steps:
+#        - checkout: self
+#          persistCredentials: true
+#          clean: true
+#        - task: PowerShell@2    
+#          condition: succeeded()
+#          displayName: Auto Merging Production
+#          name: set_sha
+#          inputs:
+#            targetType: 'inline'
+#            script: |
+#              git config --global user.email "azure-devops@assurant.com"
+#              git config --global user.name "ADO Agent"
+#              git fetch origin  
+#              $commitId='$(commitId)'
+#              $pullRequest='$(pullRequestNumber)'
+#              echo "##vso[task.setvariable variable=commitId;isoutput=true]$commitId"
+#              echo "Git Commit is: $commitId"
+#              echo "Using dev commit ID $commitId"
+#              git branch -v -a
+#              git switch -c production origin/production
+#              git status                  
+#              git merge --allow-unrelated-histories --strategy-option theirs --ff $commitId -m "$pullRequest - Auto Merge to production Commit Id: $commitId" 
+#              git commit -m "Auto Merge to production Build Number: $(Build.BuildNumber)"
+#              git push --set-upstream origin production
+#      - job: ArtifactAndVersion    
+#        dependsOn: AutoMergingToProd 
+#        steps:
+#           - task: PowerShell@2    
+#             condition: succeeded()
+#             displayName: Get Artifact Name and Version
+#             name: PackagePublished
+#             inputs:
+#               targetType: 'inline'
+#               script: |
+#                    echo "Artifact To Deploy: $(artifactNameAndVersion)"
+#                    echo "Artifact Version: $(artifactVersion)"
+#                    echo "##vso[task.setvariable variable=PackageNameAndVersion;isOutput=true]$(artifactNameAndVersion)"
+#                    echo "##vso[task.setvariable variable=commitId;isOutput=true]$(commitId)"
+#                    echo "##vso[task.setvariable variable=artifactVersion]$(artifactVersion)"
+#      - deployment: DeploytoProd
+#        displayName: Deploy
+#        environment: d2c-greenfield-prod
+#        dependsOn: ArtifactAndVersion
+#        condition: succeeded()
+#        variables:
+#          - group: d2c-global-common-prod
+#          - group: d2c-global-backend-sf-prod
+#        strategy:
+#         runOnce:
+#           deploy:
+#            steps:
+#             - task: UniversalPackages@0
+#               inputs:
+#                 command: 'download'
+#                 downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+#                 vstsFeed: ${{ parameters.artifact_feed }}
+#                 vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+#                 vstsPackageVersion: $(artifactVersion)
+      
+#             - task: AzureRmWebAppDeployment@4
+#               condition: succeeded()
+#               displayName: 'Azure App Service Deploy: app-D2Cappservice-renderer'
+#               inputs:
+#                 ConnectionType: 'AzureRM'
+#                 azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Prod'
+#                 appType: 'webApp'
+#                 WebAppName: 'app-D2Cappservice-renderer'
+#                 deployToSlotOrASE: true
+#                 ResourceGroupName: 'RGGS-D2CHO3-PROD'
+#                 SlotName: 'production'
+#                 packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+#                 enableXmlVariableSubstitution: true
+#                 JSONFiles: '**/appsettings.json'
+#      - deployment: DeploytoProdDR
+#        displayName: Deploy
+#        environment: d2c-greenfield-prod
+#        dependsOn: ArtifactAndVersion
+#        condition: succeeded()
+#        variables:
+#          - group: d2c-global-common-prod
+#          - group: d2c-global-backend-sf-prod-dr
+#        strategy:
+#         runOnce:
+#           deploy:
+#            steps:
+#             - task: UniversalPackages@0
+#               inputs:
+#                 command: 'download'
+#                 downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+#                 vstsFeed: ${{ parameters.artifact_feed }}
+#                 vstsFeedPackage:  '${{variables.appName}}' #get latest package from model
+#                 vstsPackageVersion: $(artifactVersion)
+
+#             - task: AzureRmWebAppDeployment@4
+#               condition: succeeded()
+#               displayName: 'Azure App Service Deploy: app-D2Cappservice-renderer-EASTUS2'
+#               inputs:
+#                 ConnectionType: 'AzureRM'
+#                 azureSubscription: 'SE-AIZ-Global-GH-Global Specialty-Assurant SPOKE P&C Claims Prod'
+#                 appType: 'webApp'
+#                 WebAppName: 'app-D2Cappservice-renderer-eastus2'
+#                 deployToSlotOrASE: true
+#                 ResourceGroupName: 'RGGS-D2CHO3-PROD'
+#                 SlotName: 'production'
+#                 packageForLinux: '$(Build.ArtifactStagingDirectory)\**\Assurant.Renderer1.zip'
+#                 enableXmlVariableSubstitution: true
+#                 JSONFiles: '**/appsettings.json'
